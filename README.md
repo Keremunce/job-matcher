@@ -195,7 +195,7 @@ You write job application assets that are TRUE and EVIDENCE-BASED.
 
 ```bash
 # 1) Clone
-git clone https://github.com/yourname/specmatch
+git clone https://github.com/Keremunce/specmatch
 cd specmatch
 
 # 2) Install
