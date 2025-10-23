@@ -1,17 +1,17 @@
-# specmatch v1.5 — Truthful AI Resume Matcher
+# specmatch v2.0 — Truthful Resume Rewriter
 
-specmatch v1.5 turns an existing resume and a target job description into an honest, JD-aligned resume pack. Upload a PDF (or fill the structured form), review the truth-guarded match output, and export a refreshed one-page resume PDF — all without fabricating experience.
+specmatch v2.0 ingests a resume + job description, rewrites the resume truthfully for the target role, and surfaces an emoji-friendly, explainable fit breakdown. Upload a PDF, view the original and optimized versions side-by-side, and export the improved resume — all without inventing experience.
 
 ## ✨ Features
-- **Resume ingestion**: Upload a PDF resume, parse it with `pdf-parse`, and structure the data via OpenAI JSON mode + Zod validation.
-- **Manual editing**: shadcn/ui form backed by `react-hook-form` lets candidates edit contact info, skills, and project evidence.
-- **Truth guard matching**: `/api/match` normalizes inputs, applies strict evidence rules, and asks OpenAI (gpt-4o-mini) for the match output (fit score, bullets, cover letter, risks, trace).
-- **Resume export**: `/api/export-pdf` renders a new one-page PDF with pdfkit including contact header, aligned bullets, talking points, risks, and optional cover letter snapshot.
+- **Instant rewrite**: `/api/rewrite-resume` produces a truthful, role-aware resume rewrite automatically after each run — no extra button click required.
+- **Explainable scoring**: `/api/match` blends LLM reasoning with normalized keyword overlap to deliver balanced scores (🟢 fit, 💡 highlights, ⚠️ gaps, 🧭 verdict).
+- **Dark mode UX**: Theme toggle (light/dark) with neutral/emerald palette, emoji callouts, and dual-column resume view for readability.
+- **Resume export**: `/api/export-pdf` outputs a one-page PDF using the improved framing while preserving truthful evidence.
 - **Mock-friendly**: If `OPENAI_API_KEY` is unset, the API routes return deterministic placeholder data so the UI flows without live calls.
 
 ## 🧱 Tech Stack
 - Next.js 15 (App Router, TypeScript, Tailwind)
-- shadcn/ui components (button, input, textarea, label, card, progress, accordion, form)
+- shadcn/ui components (button, input, textarea, label, card, form, theme toggle)
 - `react-hook-form` + `@hookform/resolvers` for controlled forms
 - OpenAI Node SDK (chat completions with JSON schema)
 - `zod` schemas shared between client and server
@@ -21,12 +21,13 @@ specmatch v1.5 turns an existing resume and a target job description into an hon
 ```
 src/
 ├─ app/
-│  ├─ page.tsx                  # Upload/form UI, JD input, match + export controls
+│  ├─ page.tsx                  # Target role flow, resume rewrite + breakdown UI
 │  └─ api/
 │     ├─ parse-pdf/route.ts     # PDF → CandidateProfile (OpenAI-backed)
 │     ├─ match/route.ts         # Truth-guarded JD ↔ profile matcher
-│     └─ export-pdf/route.ts    # Resume PDF generator
-├─ components/ui/               # shadcn/ui components + barrel exports
+│     ├─ export-pdf/route.ts    # Resume PDF generator
+│     └─ rewrite-resume/route.ts# Truthful resume rewrite engine
+├─ components/ui/               # shadcn/ui components, theme toggle, barrel exports
 ├─ lib/
 │  ├─ normalizers.ts            # Sanitizers for profiles and job specs
 │  ├─ pdf.ts                    # pdfkit resume layout helper
@@ -48,7 +49,7 @@ src/
    ```bash
    pnpm dev
    ```
-   Visit `http://localhost:3000` and upload a resume or fill the form, then paste the JD to generate a match.
+   Visit `http://localhost:3000`, enter the target role + JD, upload a resume, and watch the optimized version appear beside the original.
 
 ## 🔌 API Reference
 ### `POST /api/parse-pdf`
@@ -57,12 +58,16 @@ src/
 
 ### `POST /api/match`
 - **Input**: `{ jobSpecRaw, candidateProfileRaw }`
-- **Output**: `MatchOutput` (`fitScore`, `rationale[]`, `bullets[]`, `coverLetter`, `talkingPoints[]`, `risks[]`, `trace[]`)
+- **Output**: `MatchOutput` (`fit_score`, `highlights[]`, `gaps[]`, `verdict`, plus diagnostics like `llm_fit_score`, `keyword_overlap`)
 - **Safety**: Enforced truth guard (no fabricated evidence; gaps and adjacent skills flagged).
 
 ### `POST /api/export-pdf`
 - **Input**: `{ candidateProfile, matchOutput }`
 - **Output**: PDF stream (`Content-Type: application/pdf`) — ready to download.
+
+### `POST /api/rewrite-resume`
+- **Input**: `{ candidateProfile, jobSpec, matchOutput }`
+- **Output**: `{ rewrite }` plain-text guidance to tighten the resume around the JD.
 
 ## 🧪 Development Notes
 - Lint: `pnpm lint`

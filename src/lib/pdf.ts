@@ -1,4 +1,6 @@
 import PDFDocument from "pdfkit"
+import fs from "node:fs"
+import { createRequire } from "node:module"
 import type { CandidateProfile, MatchOutput } from "@/types"
 
 type CreateResumeOptions = {
@@ -25,11 +27,80 @@ const sectionTitle = (doc: PDFKit.PDFDocument, title: string) => {
   doc.moveDown(0.4)
 }
 
+const ensureStandardFontsPatched = (() => {
+  let patched = false
+  return () => {
+    if (patched) return
+    patched = true
+
+    const require = createRequire(import.meta.url)
+    const standardFontFiles = [
+      "Courier.afm",
+      "Courier-Bold.afm",
+      "Courier-Oblique.afm",
+      "Courier-BoldOblique.afm",
+      "Helvetica.afm",
+      "Helvetica-Bold.afm",
+      "Helvetica-Oblique.afm",
+      "Helvetica-BoldOblique.afm",
+      "Times-Roman.afm",
+      "Times-Bold.afm",
+      "Times-Italic.afm",
+      "Times-BoldItalic.afm",
+      "Symbol.afm",
+      "ZapfDingbats.afm",
+    ] as const
+
+    const fontBuffers = new Map<string, Buffer>()
+
+    for (const fileName of standardFontFiles) {
+      try {
+        const resolved = require.resolve(`pdfkit/js/data/${fileName}`)
+        const buffer = fs.readFileSync(resolved)
+        fontBuffers.set(fileName, buffer)
+      } catch (error) {
+        console.warn(`[pdfkit] Failed to preload font data for ${fileName}`, error)
+      }
+    }
+
+    const originalReadFileSync = fs.readFileSync
+
+    const patchedReadFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+      const [filePath, options] = args
+
+      if (typeof filePath === "string") {
+        const normalized = filePath.replace(/\\/g, "/")
+        const idx = normalized.indexOf("/pdfkit/js/data/")
+        if (idx !== -1) {
+          const fileName = normalized.slice(idx + "/pdfkit/js/data/".length)
+          const buffer = fontBuffers.get(fileName)
+          if (buffer) {
+            if (typeof options === "string") {
+              return Buffer.from(buffer).toString(options)
+            }
+            if (options && typeof options === "object" && options.encoding) {
+              const encoding = options.encoding === null ? undefined : options.encoding
+              return Buffer.from(buffer).toString(encoding)
+            }
+            return Buffer.from(buffer)
+          }
+        }
+      }
+
+      return originalReadFileSync(...args)
+    }) as typeof fs.readFileSync
+
+    fs.readFileSync = patchedReadFileSync
+  }
+})()
+
 export const createResumePdf = async (
   profile: CandidateProfile,
   matchOutput: MatchOutput,
   options: CreateResumeOptions = {},
 ): Promise<Buffer> => {
+  ensureStandardFontsPatched()
+
   const contactName = profile.contact.name || "Candidate"
   const doc = new PDFDocument({ size: "A4", margin: 50, info: { Title: `${contactName} — Job Ready Resume` } })
   const chunks: Buffer[] = []
@@ -71,24 +142,28 @@ export const createResumePdf = async (
     })
   }
 
-  sectionTitle(doc, "JD-Aligned Highlights")
-  doc.font("Helvetica").fontSize(10)
-  matchOutput.bullets.forEach((item) => bullet(doc, item))
+  sectionTitle(doc, "Fit Summary")
+  doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827").text(`Verdict: ${matchOutput.verdict}`)
+  const scoreSummary = [
+    `Fit Score: ${matchOutput.fit_score}/100`,
+    matchOutput.llm_fit_score !== undefined ? `LLM Score: ${matchOutput.llm_fit_score}/100` : null,
+    matchOutput.keyword_overlap !== undefined ? `Keyword Overlap: ${matchOutput.keyword_overlap}%` : null,
+  ]
+    .filter(Boolean)
+    .join(" • ")
+  doc.moveDown(0.2)
+  doc.font("Helvetica").fontSize(10).fillColor("#111827").text(scoreSummary)
 
-  if (matchOutput.talkingPoints.length) {
-    sectionTitle(doc, "Talking Points")
-    doc.fillColor("#111827")
-    matchOutput.talkingPoints.forEach((item) => bullet(doc, item))
+  if (matchOutput.highlights.length) {
+    sectionTitle(doc, "Strength Highlights")
+    doc.font("Helvetica").fontSize(10)
+    matchOutput.highlights.forEach((item) => bullet(doc, item))
   }
 
-  if (matchOutput.risks.length) {
-    sectionTitle(doc, "Risk Acknowledgements")
+  if (matchOutput.gaps.length) {
+    sectionTitle(doc, "Gaps & Follow-ups")
     doc.font("Helvetica").fontSize(10)
-    matchOutput.risks.forEach((risk) => {
-      const prefix =
-        risk.type === "adjacent" ? "Adjacency" : risk.type === "soft" ? "Development Area" : "Gap"
-      bullet(doc, `${prefix}: ${risk.gap} — Mitigation: ${risk.mitigation}`)
-    })
+    matchOutput.gaps.forEach((item) => bullet(doc, item))
   }
 
   if (profile.projects.length) {
@@ -109,9 +184,18 @@ export const createResumePdf = async (
     })
   }
 
-  if (options.includeCoverLetter && matchOutput.coverLetter) {
-    sectionTitle(doc, "Cover Letter Snapshot")
-    doc.font("Helvetica").fontSize(10).text(matchOutput.coverLetter, {
+  if (options.includeCoverLetter) {
+    sectionTitle(doc, "Follow-up Narrative")
+    const narrativeLines = [
+      `Verdict: ${matchOutput.verdict}`,
+      "",
+      matchOutput.highlights.length ? `Strengths: ${matchOutput.highlights.join("; ")}` : null,
+      matchOutput.gaps.length ? `Gaps: ${matchOutput.gaps.join("; ")}` : null,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n")
+
+    doc.font("Helvetica").fontSize(10).text(narrativeLines || "Summary currently unavailable.", {
       lineGap: 4,
     })
   }

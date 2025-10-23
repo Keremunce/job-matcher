@@ -1,17 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useFieldArray, useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
   Button,
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
   DropZone,
@@ -23,11 +20,12 @@ import {
   FormLabel,
   FormMessage,
   Input,
-  Progress,
   Textarea,
+  ThemeToggle,
 } from "@/components/ui"
-import type { CandidateProfile, MatchOutput } from "@/types"
+import type { CandidateProfile, JobSpec, MatchOutput } from "@/types"
 import { extractPdfText } from "@/lib/client/pdfExtractor"
+import { cn } from "@/lib/utils"
 
 const optionalEmail = z.string().email("Enter a valid email.").or(z.literal("")).optional()
 const optionalUrl = z.string().url("Enter a valid URL.").or(z.literal("")).optional()
@@ -146,23 +144,6 @@ const clampScore = (score?: number) => {
   return Math.min(100, Math.max(0, score))
 }
 
-const extractMatchedEvidence = (matches: unknown[]) =>
-  matches
-    .map((item) => {
-      if (typeof item === "string") return item
-      if (item && typeof item === "object") {
-        const record = item as Record<string, unknown>
-        return (
-          (typeof record.skill === "string" && record.skill) ||
-          (typeof record.project === "string" && record.project) ||
-          (typeof record.snippet === "string" && record.snippet) ||
-          undefined
-        )
-      }
-      return undefined
-    })
-    .filter((entry): entry is string => Boolean(entry))
-
 export default function Home() {
   const [resumeFile, setResumeFile] = useState<File | null>(null)
   const [parseLoading, setParseLoading] = useState(false)
@@ -178,6 +159,11 @@ export default function Home() {
   const [pdfText, setPdfText] = useState("")
   const [pdfTextSource, setPdfTextSource] = useState<"client" | "ocr" | null>(null)
   const [ocrLoading, setOcrLoading] = useState(false)
+  const [rewriteLoading, setRewriteLoading] = useState(false)
+  const [improvedResume, setImprovedResume] = useState<string | null>(null)
+  const [resumeReady, setResumeReady] = useState(false)
+  const [lastSubmittedSignature, setLastSubmittedSignature] = useState<string | null>(null)
+  const [rewriteError, setRewriteError] = useState<string | null>(null)
 
   const form = useForm<ManualProfileFormValues>({
     resolver: zodResolver(manualProfileSchema),
@@ -208,6 +194,52 @@ export default function Home() {
     projects:
       watchedValues.projects?.length === 0 ? [defaultProjectRow] : watchedValues.projects,
   })
+  const targetRoleLabel = watchedValues.jobTitle?.trim() || "your target role"
+
+  const originalResumeView = useMemo(() => {
+    if (pdfText.trim()) {
+      return pdfText.trim()
+    }
+
+    const profile = candidateProfile ?? previewProfile
+    if (!profile) {
+      return "Original resume text will appear here after upload."
+    }
+
+    const lines: string[] = []
+    lines.push(profile.contact.name)
+    if (profile.title) lines.push(`Current Title: ${profile.title}`)
+    if (profile.location) lines.push(`Location: ${profile.location}`)
+    if (profile.additionalContext) lines.push(profile.additionalContext)
+    if (profile.skills.length) lines.push(`Skills: ${profile.skills.join(", ")}`)
+    if (profile.tools.length) lines.push(`Tools: ${profile.tools.join(", ")}`)
+
+    if (profile.projects.length) {
+      lines.push("Experience:")
+      profile.projects.forEach((project) => {
+        lines.push(`- ${project.name}: ${project.summary}`)
+        if (project.outcomes.length) {
+          lines.push(`  Outcomes: ${project.outcomes.join("; ")}`)
+        }
+      })
+    }
+
+    return lines.filter(Boolean).join("\n")
+  }, [pdfText, candidateProfile, previewProfile])
+
+  useEffect(() => {
+    if (!resumeReady || !lastSubmittedSignature) {
+      return
+    }
+
+    const currentSignature = JSON.stringify(watchedValues)
+    if (currentSignature !== lastSubmittedSignature) {
+      setResumeReady(false)
+      setMatchResult(null)
+      setImprovedResume(null)
+      setRewriteError(null)
+    }
+  }, [resumeReady, lastSubmittedSignature, watchedValues])
 
   const handleResumeUpload = useCallback(
     async (file: File | null) => {
@@ -217,6 +249,12 @@ export default function Home() {
       setPdfTextSource(null)
       setPdfExtractError(null)
       setOcrError(null)
+      setResumeReady(false)
+      setMatchResult(null)
+      setLastSubmittedSignature(null)
+      setImprovedResume(null)
+      setRewriteError(null)
+      setRewriteLoading(false)
 
       setPdfExtractLoading(true)
       try {
@@ -305,6 +343,11 @@ export default function Home() {
         throw new Error("OCR response did not include text.")
       }
 
+      setImprovedResume(null)
+      setRewriteError(null)
+      setResumeReady(false)
+      setMatchResult(null)
+
       setPdfText(text)
       setPdfTextSource("ocr")
       setPdfExtractError(null)
@@ -318,10 +361,14 @@ export default function Home() {
   const onGenerateMatch = handleSubmit(async (values) => {
     setMatchLoading(true)
     setMatchError(null)
+    setMatchResult(null)
+    setImprovedResume(null)
+    setRewriteError(null)
 
     try {
       const profile = toCandidateProfile(values)
       const jobSpec = buildJobSpec(values)
+      setResumeReady(false)
 
       const res = await fetch("/api/match", {
         method: "POST",
@@ -340,9 +387,14 @@ export default function Home() {
       const data = (await res.json()) as MatchOutput
       setCandidateProfile(profile)
       setMatchResult(data)
+
+      const rewriteSuccess = await runRewrite(profile, jobSpec, data)
+      setResumeReady(rewriteSuccess)
+      setLastSubmittedSignature(JSON.stringify(values))
     } catch (error) {
       setMatchResult(null)
       setMatchError(error instanceof Error ? error.message : "Unexpected error while generating match.")
+      setResumeReady(false)
     } finally {
       setMatchLoading(false)
     }
@@ -381,28 +433,151 @@ export default function Home() {
       URL.revokeObjectURL(url)
     } catch (error) {
       setMatchError(error instanceof Error ? error.message : "Unexpected error while exporting PDF.")
+      setResumeReady(false)
     } finally {
       setExportLoading(false)
     }
   }
 
+  const handleDownloadMatchText = () => {
+    if (!matchResult) {
+      setMatchError("Generate a resume summary before downloading the match output.")
+      return
+    }
+    setMatchError(null)
+
+    const lines: string[] = []
+    lines.push(`Fit Score: ${clampScore(matchResult.fit_score)}`)
+    if (typeof matchResult.llm_fit_score === "number") {
+      lines.push(`LLM Score: ${clampScore(matchResult.llm_fit_score)}`)
+    }
+    if (typeof matchResult.keyword_overlap === "number") {
+      lines.push(`Keyword Overlap: ${matchResult.keyword_overlap}%`)
+    }
+
+    lines.push("")
+
+    if (matchResult.highlights.length) {
+      lines.push("Highlights:")
+      matchResult.highlights.forEach((item) => lines.push(`- ${item}`))
+      lines.push("")
+    }
+
+    if (matchResult.gaps.length) {
+      lines.push("Gaps:")
+      matchResult.gaps.forEach((item) => lines.push(`- ${item}`))
+      lines.push("")
+    }
+
+    lines.push(`Verdict: ${matchResult.verdict}`)
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "specmatch-match-output.txt"
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const runRewrite = async (profile: CandidateProfile, jobSpec: JobSpec, result: MatchOutput) => {
+    setRewriteLoading(true)
+    setRewriteError(null)
+    setImprovedResume(null)
+
+    try {
+      const res = await fetch("/api/rewrite-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidateProfile: profile,
+          jobSpec,
+          matchOutput: result,
+        }),
+      })
+
+      if (!res.ok) {
+        const details = await res.json().catch(() => ({}))
+        throw new Error(details.error ?? "Failed to generate optimized resume.")
+      }
+
+      const payload = (await res.json()) as { rewrite?: string }
+      const text = payload.rewrite?.trim()
+      if (!text) {
+        throw new Error("Rewrite response was empty.")
+      }
+
+      setImprovedResume(text)
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected error while optimizing resume."
+      setRewriteError(message)
+      return false
+    } finally {
+      setRewriteLoading(false)
+    }
+  }
   return (
     <Form {...form}>
-      <form className="mx-auto flex max-w-5xl flex-col gap-8 p-8" onSubmit={onGenerateMatch}>
-        <header>
-          <h1 className="text-3xl font-bold tracking-tight">specmatch v1.5 — Truthful Resume Optimizer</h1>
-          <p className="text-muted-foreground mt-2 text-sm">
-            Upload an existing resume or fill in the form, paste the job description, then generate evidence-backed
-            bullets and a fresh one-page PDF tailored to the role.
-          </p>
+      <form className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-10 p-6 pb-12" onSubmit={onGenerateMatch}>
+        <header className="flex flex-col gap-4 border-b border-neutral-200 pb-6 dark:border-neutral-800">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-2">
+              <h1 className="text-3xl font-semibold tracking-tight text-neutral-900 dark:text-gray-100">
+                specmatch v2.0 — Truthful Resume Rewriter
+              </h1>
+              <p className="max-w-3xl text-sm text-neutral-600 dark:text-neutral-400">
+                Paste the job description, drop in your current resume, and receive an honest, role-aware rewrite with an
+                explainable fit breakdown. No fabrication—just optimized framing of your real experience.
+              </p>
+            </div>
+            <ThemeToggle />
+          </div>
         </header>
 
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <Card className="border-dashed">
-          <CardHeader>
-            <CardTitle>Upload your resume (.pdf)</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        <div className="space-y-6">
+          <Card className="border border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+            <CardHeader>
+              <CardTitle>Step 1 — Target Role &amp; Job Description</CardTitle>
+              <CardDescription>Tell us the role you’re aiming for and paste the responsibilities.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <FormField
+                control={control}
+                name="jobTitle"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Target Role</FormLabel>
+                    <FormControl>
+                      <Input placeholder="Senior Product Designer" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={control}
+                name="jobDescription"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Job Description</FormLabel>
+                    <FormControl>
+                      <Textarea rows={8} placeholder="Paste the JD content (responsibilities, must-haves, etc.)" {...field} />
+                    </FormControl>
+                    <FormDescription className="text-xs">Irrelevant benefits text is stripped automatically.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="border border-dashed border-neutral-300 bg-white shadow-sm dark:border-neutral-700 dark:bg-neutral-900">
+            <CardHeader>
+              <CardTitle>Step 2 — Upload Your Resume (PDF)</CardTitle>
+              <CardDescription>We extract text locally before sending anything to the server.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
             <DropZone onFile={setResumeFile} disabled={parseLoading || pdfExtractLoading || ocrLoading} />
             {resumeFile && (
               <p className="text-muted-foreground text-xs">Selected file: {resumeFile.name}</p>
@@ -423,7 +598,7 @@ export default function Home() {
               </div>
             )}
             {pdfExtractError && (
-              <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-500/60 dark:bg-amber-500/10 dark:text-amber-200">
                 <p className="font-medium">Could not extract PDF text locally.</p>
                 <p className="mt-1">Try OCR (server-side) to handle scanned or image-based resumes.</p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -440,79 +615,28 @@ export default function Home() {
               </div>
             )}
             {parseError && <p className="text-destructive text-sm">{parseError}</p>}
-            <div className="rounded-md bg-muted/40 p-4">
-              <h3 className="text-sm font-semibold">Preview</h3>
-                <p className="mt-2 text-sm">
-                  <span className="font-medium">{previewProfile.contact.name}</span>
-                  {previewProfile.title ? ` — ${previewProfile.title}` : ""}
-                </p>
-                <p className="text-muted-foreground text-xs">
-                  {[previewProfile.contact.email, previewProfile.contact.phone, previewProfile.contact.linkedin]
-                    .filter(Boolean)
-                    .join(" • ")}
-                </p>
-                <div className="mt-3 space-y-2 text-xs">
-                  <p>
-                    <span className="font-medium">Skills:</span> {previewProfile.skills.join(", ") || "Add skills"}
-                  </p>
-                  <p>
-                    <span className="font-medium">Projects:</span>{" "}
-                    {previewProfile.projects.length
-                      ? previewProfile.projects.map((project) => project.name).join(", ")
-                      : "Add project experience"}
-                  </p>
-                  {previewProfile.additionalContext && (
-                    <p>
-                      <span className="font-medium">Additional:</span> {previewProfile.additionalContext}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+            <div className="rounded-md border border-neutral-200 bg-neutral-100 p-4 dark:border-neutral-800 dark:bg-neutral-950">
+              <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">Local Preview</h3>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                Adjust any fields below before generating the optimized version.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Job Description</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <FormField
-                control={control}
-                name="jobTitle"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Target Role Title</FormLabel>
-                    <FormControl>
-                      <Input placeholder="Senior Frontend Engineer" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={control}
-                name="jobDescription"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Paste Job Description</FormLabel>
-                    <FormControl>
-                      <Textarea rows={8} placeholder="Paste the JD content..." {...field} />
-                    </FormControl>
-                    <FormDescription>Include responsibilities and must-have skills for the best alignment.</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </CardContent>
-          </Card>
-        </div>
-
-        <Card>
+        <Card className="border border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
           <CardHeader>
             <CardTitle>Candidate Details</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-6">
+            <div className="relative">
+              {parseLoading && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-lg bg-background/80 backdrop-blur-sm">
+                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+                  <p className="text-sm text-muted-foreground">Filling in details from your resume…</p>
+                </div>
+              )}
+              <div className={cn("grid gap-6", parseLoading ? "pointer-events-none opacity-50" : "")}>
               <div className="grid gap-4 md:grid-cols-2">
                 <FormField
                   control={control}
@@ -626,27 +750,6 @@ export default function Home() {
                     </FormItem>
                   )}
                 />
-                <FormField
-                  control={control}
-                  name="additionalContext"
-                  render={({ field }) => (
-                    <FormItem className="md:col-span-2">
-                      <FormLabel>Additional Context</FormLabel>
-                      <FormDescription>
-                        Optional space to highlight experience or strengths that are not covered in your resume. Included
-                        when generating AI outputs.
-                      </FormDescription>
-                      <FormControl>
-                        <Textarea
-                          placeholder="e.g. Led UI/UX initiatives for 3 SaaS products, delivering component libraries and usability research."
-                          rows={4}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
               </div>
 
               <div className="space-y-4">
@@ -734,99 +837,131 @@ export default function Home() {
                 ))}
               </div>
 
+              <FormField
+                control={control}
+                name="additionalContext"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Additional Context</FormLabel>
+                    <FormDescription>
+                      Optional space to highlight experience or strengths that are not covered in your resume. Included
+                      when generating AI outputs.
+                    </FormDescription>
+                    <FormControl>
+                      <Textarea
+                        placeholder="e.g. Led UI/UX initiatives for 3 SaaS products, delivering component libraries and usability research."
+                        rows={4}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
               {matchError && <p className="text-destructive text-sm">{matchError}</p>}
 
               <div className="flex flex-wrap items-center gap-3">
-                <Button type="submit" disabled={matchLoading}>
-                  {matchLoading ? "Generating match..." : "Generate Match"}
+                <Button type="submit" disabled={matchLoading || rewriteLoading || resumeReady}>
+                  {matchLoading || rewriteLoading
+                    ? "Optimizing resume..."
+                    : resumeReady
+                      ? "Resume Ready"
+                      : "Generate Optimized Resume"}
                 </Button>
                 <Button
                   type="button"
-                  variant="secondary"
+                  variant={matchResult ? "default" : "secondary"}
                   disabled={!matchResult || exportLoading}
                   onClick={handleExportPdf}
                 >
-                  {exportLoading ? "Preparing PDF..." : "Download New Resume (PDF)"}
+                  {exportLoading ? "Preparing PDF..." : "Export Improved Resume (PDF)"}
                 </Button>
+                <Button type="button" variant="outline" disabled={!matchResult} onClick={handleDownloadMatchText}>
+                  Download Match Output (.txt)
+                </Button>
+              </div>
               </div>
             </div>
           </CardContent>
         </Card>
 
       {matchResult && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Match Output</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <h2 className="text-xl font-semibold">Fit Score: {clampScore(matchResult.fitScore)}</h2>
-              <Progress value={clampScore(matchResult.fitScore)} />
-            </div>
-            <Accordion type="multiple" className="space-y-2">
-              <AccordionItem value="rationale">
-                <AccordionTrigger>Fit Rationale</AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  {matchResult.rationale.map((item, index) => (
-                    <p key={index}>• {item}</p>
-                  ))}
-                </AccordionContent>
-              </AccordionItem>
-              <AccordionItem value="bullets">
-                <AccordionTrigger>Resume Bullets</AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  {matchResult.bullets.map((item, index) => (
-                    <p key={index}>• {item}</p>
-                  ))}
-                </AccordionContent>
-              </AccordionItem>
-              <AccordionItem value="talking">
-                <AccordionTrigger>Talking Points</AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  {matchResult.talkingPoints.map((item, index) => (
-                    <p key={index}>• {item}</p>
-                  ))}
-                </AccordionContent>
-              </AccordionItem>
-              <AccordionItem value="cover">
-                <AccordionTrigger>Cover Letter</AccordionTrigger>
-                <AccordionContent>
-                  <p className="whitespace-pre-line text-sm leading-relaxed">{matchResult.coverLetter}</p>
-                </AccordionContent>
-              </AccordionItem>
-              <AccordionItem value="risks">
-                <AccordionTrigger>Risks &amp; Mitigations</AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  {matchResult.risks.map((risk, index) => (
-                    <p key={index}>
-                      ⚠️ {risk.type === "adjacent" ? "Adjacent skill" : risk.type === "soft" ? "Soft gap" : "Gap"} — {risk.gap} →
-                      {` ${risk.mitigation}`}
-                    </p>
-                  ))}
-                </AccordionContent>
-              </AccordionItem>
-              <AccordionItem value="trace">
-                <AccordionTrigger>Requirement Trace</AccordionTrigger>
-                <AccordionContent className="space-y-3 text-sm">
-                  {matchResult.trace.map((entry, index) => {
-                    const matches = extractMatchedEvidence(entry.matched)
-                    return (
-                      <div key={index} className="rounded-md border p-3">
-                        <p className="font-medium">{entry.requirement}</p>
-                        {matches.length ? (
-                          <p className="text-muted-foreground text-xs">Matched evidence: {matches.join(", ")}</p>
-                        ) : (
-                          <p className="text-muted-foreground text-xs">No direct evidence supplied.</p>
-                        )}
-                      </div>
-                    )
-                  })}
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="border border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+              <CardHeader>
+                <CardTitle className="text-base font-semibold text-neutral-900 dark:text-gray-100">
+                  Original Resume
+                </CardTitle>
+                <CardDescription className="text-xs text-neutral-500 dark:text-neutral-400">
+                  Raw text from your uploaded resume.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <pre className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap rounded-md bg-neutral-100 p-4 text-sm leading-relaxed text-neutral-800 dark:bg-neutral-950 dark:text-neutral-200">
+                  {originalResumeView || "Original resume text will appear here after upload."}
+                </pre>
+              </CardContent>
+            </Card>
+
+            <Card className="border border-emerald-500/40 bg-white shadow-sm dark:border-emerald-400/40 dark:bg-neutral-900">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base font-semibold text-emerald-600 dark:text-emerald-400">
+                  Optimized Resume
+                </CardTitle>
+                <CardDescription className="text-xs text-neutral-500 dark:text-neutral-400">
+                  Truthful rewrite tailored to {targetRoleLabel}.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {rewriteLoading ? (
+                  <div className="space-y-3">
+                    <div className="h-4 w-5/6 animate-pulse rounded bg-neutral-200 dark:bg-neutral-800" />
+                    <div className="h-4 w-4/6 animate-pulse rounded bg-neutral-200 dark:bg-neutral-800" />
+                    <div className="h-4 w-3/6 animate-pulse rounded bg-neutral-200 dark:bg-neutral-800" />
+                  </div>
+                ) : rewriteError ? (
+                  <p className="text-sm text-red-500 dark:text-red-400">{rewriteError}</p>
+                ) : improvedResume ? (
+                  <pre className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap rounded-md bg-neutral-100 p-4 text-sm leading-relaxed text-neutral-800 dark:bg-neutral-950 dark:text-neutral-100">
+                    {improvedResume}
+                  </pre>
+                ) : (
+                  <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                    Optimized resume will appear here once generated.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="border border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+            <CardHeader>
+              <CardTitle className="text-base font-semibold">Match Breakdown</CardTitle>
+              <CardDescription className="text-xs text-neutral-500 dark:text-neutral-400">
+                Balanced scorecard combining language model reasoning and keyword alignment.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm leading-relaxed">
+              <p className="text-lg font-semibold text-emerald-500 dark:text-emerald-400">
+                🟢 Fit Score: {clampScore(matchResult.fit_score)}/100
+              </p>
+              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                📊 LLM Score: {typeof matchResult.llm_fit_score === "number" ? clampScore(matchResult.llm_fit_score) : "n/a"}/100 · Keyword overlap: {typeof matchResult.keyword_overlap === "number" ? `${matchResult.keyword_overlap}%` : "n/a"}
+              </p>
+              <p className="text-sm text-neutral-800 dark:text-neutral-200">
+                💡 Highlights: {matchResult.highlights.length ? matchResult.highlights.join(", ") : "No standout highlights detected yet."}
+              </p>
+              <p className="text-sm text-neutral-800 dark:text-neutral-200">
+                ⚠️ Gaps: {matchResult.gaps.length ? matchResult.gaps.join(", ") : "No critical gaps flagged."}
+              </p>
+              <p className="text-base font-medium text-sky-600 dark:text-sky-300">🧭 Verdict: {matchResult.verdict}</p>
+            </CardContent>
+          </Card>
+        </div>
       )}
+        </div>
       </form>
     </Form>
   )

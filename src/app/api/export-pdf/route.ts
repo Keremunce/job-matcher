@@ -22,14 +22,16 @@ export async function POST(req: NextRequest) {
       includeCoverLetter: true,
     })
 
-    const body = new Uint8Array(pdfBuffer)
+    const responseHeaders = new Headers({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="specmatch-resume.pdf"`,
+      "Content-Length": String(pdfBuffer.byteLength),
+      "Cache-Control": "no-store",
+    })
 
-    return new NextResponse(body, {
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="specmatch-resume.pdf"`,
-        "Content-Length": String(pdfBuffer.length),
-      },
+    return new Response(new Uint8Array(pdfBuffer).buffer, {
+      status: 200,
+      headers: responseHeaders,
     })
   } catch (error) {
     console.error("[api/export-pdf] error", error)

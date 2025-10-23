@@ -38,35 +38,13 @@ export const CandidateProfileSchema = z.object({
 })
 export type CandidateProfile = z.infer<typeof CandidateProfileSchema>
 
-export const MatchRiskSchema = z.object({
-  gap: z.string(),
-  mitigation: z.string(),
-  type: z.enum(["missing", "adjacent", "soft"]).default("missing"),
-})
-
-export const MatchTraceEntrySchema = z.object({
-  requirement: z.string(),
-  matched: z.array(
-    z.union([
-      z.string(),
-      z.object({
-        skill: z.string().optional(),
-        project: z.string().optional(),
-        snippet: z.string().optional(),
-        relation: z.enum(["direct", "adjacent"]).optional(),
-      }),
-    ]),
-  ),
-})
-
 export const MatchOutputSchema = z.object({
-  fitScore: z.number().min(0).max(100),
-  rationale: z.array(z.string()),
-  bullets: z.array(z.string()),
-  coverLetter: z.string(),
-  talkingPoints: z.array(z.string()),
-  risks: z.array(MatchRiskSchema),
-  trace: z.array(MatchTraceEntrySchema),
+  fit_score: z.number().min(0).max(100),
+  highlights: z.array(z.string()).default([]),
+  gaps: z.array(z.string()).default([]),
+  verdict: z.string().trim(),
+  llm_fit_score: z.number().min(0).max(100).optional(),
+  keyword_overlap: z.number().min(0).max(100).optional(),
 })
 export type MatchOutput = z.infer<typeof MatchOutputSchema>
 

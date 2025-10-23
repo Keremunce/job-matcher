@@ -28,3 +28,4 @@ export {
   AccordionItem,
   AccordionTrigger,
 } from "./accordion"
+export { default as ThemeToggle } from "./ThemeToggle"

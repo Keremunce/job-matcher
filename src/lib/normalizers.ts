@@ -1,7 +1,26 @@
 import { CandidateProfile, JobSpec } from "@/types"
 
+const bulletRegex = /[•·◦▪►■◆▶▸-]\s*/g
+const whitespaceRegex = /\s+/g
+const disallowedCharsRegex = /[^a-zA-Z0-9.,;:/()&\-'\s]/g
+
 const trimList = (values: string[] | undefined) =>
   Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)))
+
+export const cleanResumeText = (text: string): string =>
+  text
+    .replace(bulletRegex, "- ")
+    .replace(disallowedCharsRegex, "")
+    .replace(whitespaceRegex, " ")
+    .trim()
+
+export const cleanJobDescription = (text: string): string =>
+  text
+    .replace(/(What we offer|Benefits|Compensation)[\s\S]*/i, "")
+    .replace(bulletRegex, "- ")
+    .replace(disallowedCharsRegex, "")
+    .replace(whitespaceRegex, " ")
+    .trim()
 
 export const normalizeJobSpec = (spec: JobSpec): JobSpec => ({
   ...spec,

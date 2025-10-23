@@ -9,50 +9,129 @@ import {
   MatchOutputSchema,
   MatchPayloadSchema,
 } from "@/types"
-import { normalizeCandidateProfile, normalizeJobSpec } from "@/lib/normalizers"
-import { MATCH_SYSTEM_PROMPT, buildMatchUserContent } from "@/lib/truth-guard"
+import {
+  cleanJobDescription,
+  cleanResumeText,
+  collectEvidenceStrings,
+  normalizeCandidateProfile,
+  normalizeJobSpec,
+} from "@/lib/normalizers"
+import { buildMatchSystemPrompt, buildMatchUserContent, inferRoleCategory } from "@/lib/truth-guard"
 
-function buildMockResponse(job: JobSpec, profile: CandidateProfile): MatchOutput {
-  const responsibilities = job.responsibilities.length ? job.responsibilities : ["the role requirements"]
-  const skillPool = profile.skills.length
-    ? profile.skills
-    : profile.projects.flatMap((project) => project.skills)
+const STOP_WORDS = new Set([
+  "and",
+  "or",
+  "the",
+  "a",
+  "an",
+  "for",
+  "with",
+  "from",
+  "that",
+  "this",
+  "your",
+  "our",
+  "their",
+  "to",
+  "of",
+  "in",
+  "on",
+  "by",
+  "is",
+  "are",
+  "be",
+  "as",
+  "at",
+  "we",
+  "you",
+  "will",
+  "can",
+  "able",
+  "have",
+  "has",
+  "into",
+  "within",
+  "across",
+  "about",
+  "its",
+  "it's",
+])
 
-  const skills = skillPool.length ? skillPool : ["core strengths"]
-  const firstResponsibility = responsibilities[0]
-  const primarySkill = skills[0]
+const tokenize = (text: string): string[] =>
+  (text.toLowerCase().match(/[a-z0-9+]+/g) ?? []).filter((token) => token.length > 2 && !STOP_WORDS.has(token))
+
+const extractTopKeywords = (text: string, limit = 25): string[] => {
+  const counts = new Map<string, number>()
+  for (const token of tokenize(text)) {
+    counts.set(token, (counts.get(token) ?? 0) + 1)
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([token]) => token)
+}
+
+const computeKeywordStats = (jobKeywords: string[], resumeKeywords: string[]) => {
+  if (jobKeywords.length === 0) {
+    return { overlapTerms: [] as string[], overlapCount: 0, keywordScore: 0, percent: 0 }
+  }
+
+  const jobSet = new Set(jobKeywords)
+  const resumeSet = new Set(resumeKeywords)
+  const overlapTerms = [...jobSet].filter((keyword) => resumeSet.has(keyword))
+  const overlapCount = overlapTerms.length
+  const percent = Math.round(Math.min(100, (overlapCount / jobSet.size) * 100))
+  const keywordScore = Math.min(100, (overlapCount / Math.max(10, jobSet.size)) * 120)
+  return { overlapTerms, overlapCount, keywordScore, percent }
+}
+
+const clampScore = (value: number) => Math.max(0, Math.min(100, Math.round(value)))
+
+const buildMockResponse = (job: JobSpec, profile: CandidateProfile): MatchOutput => {
+  const combinedJob = cleanJobDescription(
+    [job.title, ...job.responsibilities, ...job.mustHaves, ...job.niceToHaves, ...job.keywords].join(" "),
+  )
+  const resumeText = cleanResumeText(
+    [
+      profile.contact.name,
+      profile.title,
+      profile.additionalContext,
+      ...profile.skills,
+      ...profile.tools,
+      ...profile.projects.flatMap((project) => [project.name, project.summary, ...project.skills, ...project.outcomes]),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  )
+
+  const jobKeywords = extractTopKeywords(combinedJob)
+  const resumeKeywords = extractTopKeywords(resumeText)
+  const { keywordScore } = computeKeywordStats(jobKeywords, resumeKeywords)
+
+  const verdict =
+    keywordScore > 70
+      ? "Likely qualified with strong alignment."
+      : keywordScore > 40
+        ? "Partially qualified; additional evidence would help."
+        : "Limited evidence of fit for the role."
 
   return {
-    fitScore: 55,
-    rationale: [
-      `Evidence of ${primarySkill} partially supports "${firstResponsibility}".`,
-      "Further examples would raise the confidence score.",
-    ],
-    bullets: [
-      `Applied ${primarySkill} in recent projects to address ${firstResponsibility.toLowerCase()}.`,
-    ],
-    coverLetter: `Hello,\n\nBased on my experience with ${primarySkill}, I can contribute to ${firstResponsibility}. I focus on truthful, impact-oriented delivery and am keen to learn more about the role.\n\nBest,\n${profile.contact.name}`,
-    talkingPoints: [
-      `Discuss how ${primarySkill} was used to deliver a noteworthy outcome.`,
-      "Call out preparation to close any highlighted gaps.",
-    ],
-    risks: [
-      {
-        gap: "Limited direct evidence for several responsibilities.",
-        mitigation: "Prepare transferable examples and outline an accelerated learning plan.",
-        type: "missing",
-      },
-    ],
-    trace: responsibilities.map((requirement) => ({
-      requirement,
-      matched: skills.filter((skill) =>
-        requirement.toLowerCase().includes(skill.toLowerCase()),
-      ),
-    })),
+    fit_score: clampScore(keywordScore),
+    highlights: resumeKeywords.slice(0, 3).map((keyword) => `Resume references ${keyword}.`),
+    gaps: jobKeywords
+      .filter((keyword) => !resumeKeywords.includes(keyword))
+      .slice(0, 3)
+      .map((keyword) => `No direct mention of ${keyword}.`),
+    verdict,
+    llm_fit_score: clampScore(keywordScore),
+    keyword_overlap: Math.round(keywordScore),
   }
 }
 
 export async function POST(req: NextRequest) {
+  let normalizedJob: JobSpec | null = null
+  let normalizedProfile: CandidateProfile | null = null
+
   try {
     const json = await req.json().catch(() => null)
     if (!json) {
@@ -77,8 +156,35 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const normalizedJob = normalizeJobSpec(jobSpecResult.data)
-    const normalizedProfile = normalizeCandidateProfile(profileResult.data)
+    normalizedJob = normalizeJobSpec(jobSpecResult.data)
+    normalizedProfile = normalizeCandidateProfile(profileResult.data)
+
+    const combinedJob = cleanJobDescription(
+      [
+        normalizedJob.title,
+        ...normalizedJob.responsibilities,
+        ...normalizedJob.mustHaves,
+        ...normalizedJob.niceToHaves,
+        ...normalizedJob.keywords,
+      ].join(" "),
+    )
+
+    const resumeEvidence = cleanResumeText(
+      [
+        normalizedProfile.contact.name,
+        normalizedProfile.title,
+        normalizedProfile.location,
+        normalizedProfile.additionalContext,
+        ...collectEvidenceStrings(normalizedProfile),
+      ]
+        .filter(Boolean)
+        .join(" "),
+    )
+
+    const jobKeywords = extractTopKeywords(combinedJob)
+    const resumeKeywords = extractTopKeywords(resumeEvidence)
+    const { keywordScore } = computeKeywordStats(jobKeywords, resumeKeywords)
+    const roleCategory = inferRoleCategory(normalizedJob)
 
     const apiKey = process.env.OPENAI_API_KEY
     if (!apiKey) {
@@ -93,8 +199,19 @@ export async function POST(req: NextRequest) {
     const completion = await openai.chat.completions.create({
       model: process.env.MODEL || "gpt-4o-mini",
       messages: [
-        { role: "system", content: MATCH_SYSTEM_PROMPT },
-        { role: "user", content: buildMatchUserContent(normalizedJob, normalizedProfile) },
+        { role: "system", content: buildMatchSystemPrompt(roleCategory) },
+        {
+          role: "user",
+          content: buildMatchUserContent({
+            jobSpec: normalizedJob,
+            candidateProfile: normalizedProfile,
+            cleanedJobDescription: combinedJob,
+            cleanedResumeText: resumeEvidence,
+            role: roleCategory,
+            jobKeywords,
+            resumeKeywords,
+          }),
+        },
       ],
       response_format: { type: "json_object" },
     })
@@ -105,9 +222,25 @@ export async function POST(req: NextRequest) {
     }
 
     const parsed = MatchOutputSchema.parse(JSON.parse(content))
-    return NextResponse.json(parsed)
+    const llmScore = clampScore(parsed.fit_score)
+    const finalScore = clampScore(llmScore * 0.7 + keywordScore * 0.3)
+
+    return NextResponse.json({
+      ...parsed,
+      fit_score: finalScore,
+      llm_fit_score: llmScore,
+      keyword_overlap: Math.round(keywordScore),
+      highlights: parsed.highlights.slice(0, 6),
+      gaps: parsed.gaps.slice(0, 6),
+      verdict: parsed.verdict.trim(),
+    })
   } catch (error) {
     console.error("[api/match] error", error)
+    if (normalizedJob && normalizedProfile) {
+      console.warn("[api/match] Returning mock output after failure.")
+      return NextResponse.json(buildMockResponse(normalizedJob, normalizedProfile))
+    }
+
     return NextResponse.json(
       { error: "Unable to generate match output.", details: error instanceof Error ? error.message : error },
       { status: 500 },
