@@ -7,6 +7,22 @@ import { asciiSafe, composeContact, sanitizeProjectTitle } from "@/lib/normalize
 
 export const BUNDLED_FONT_PATH = path.resolve(process.cwd(), "public", "fonts", "Roboto-Regular.ttf")
 
+const SECTION_TITLE_COLOR = "#374151"
+const BODY_COLOR = "#111827"
+const FOOTNOTE_COLOR = "#4B5563"
+const SECTION_TITLE_FONT_SIZE = 13
+const SUBTITLE_FONT_SIZE = 11
+const BODY_FONT_SIZE = 10
+
+const getContentWidth = (doc: PDFKit.PDFDocument) =>
+  doc.page.width - doc.page.margins.left - doc.page.margins.right
+
+const addVerticalSpace = (doc: PDFKit.PDFDocument, value: number) => {
+  if (value > 0) {
+    doc.moveDown(value)
+  }
+}
+
 const ensureBundledFontPath = () => {
   if (!fs.existsSync(BUNDLED_FONT_PATH)) {
     throw new Error(`[pdf] Bundled font not found at ${BUNDLED_FONT_PATH}`)
@@ -17,42 +33,143 @@ const ensureBundledFontPath = () => {
 
 const ensureAscii = (value: string | undefined | null): string => asciiSafe(value ?? "")
 
-const renderSectionTitle = (doc: PDFKit.PDFDocument, title: string) => {
-  doc.moveDown(0.9)
-  doc.fontSize(11).text(ensureAscii(title).toUpperCase())
-  doc.moveDown(0.15)
+const renderSectionTitle = (
+  doc: PDFKit.PDFDocument,
+  title: string,
+  options: { isFirstSection?: boolean } = {}
+) => {
+  const { isFirstSection = false } = options
+  const baseSpacing = isFirstSection ? 0.7 : 0.8
+  const spacingBeforeTitle = Math.max(baseSpacing - 0.3, 0)
+
+  addVerticalSpace(doc, spacingBeforeTitle)
+  addVerticalSpace(doc, 0.3)
+
+  const content = ensureAscii(title).toUpperCase()
+  const width = getContentWidth(doc)
+
+  doc
+    .font(BUNDLED_FONT_PATH)
+    .fillColor(SECTION_TITLE_COLOR)
+    .fontSize(SECTION_TITLE_FONT_SIZE)
+    .text(content, { width })
+
+  const ruleY = doc.y + 2
+  doc
+    .moveTo(doc.page.margins.left, ruleY)
+    .lineTo(doc.page.width - doc.page.margins.right, ruleY)
+    .lineWidth(1)
+    .strokeColor(SECTION_TITLE_COLOR)
+    .stroke()
+
+  addVerticalSpace(doc, 0.5)
+  doc.fillColor(BODY_COLOR).fontSize(BODY_FONT_SIZE).strokeColor(BODY_COLOR).lineWidth(1)
 }
 
-const renderParagraph = (doc: PDFKit.PDFDocument, text: string) => {
+const renderParagraph = (doc: PDFKit.PDFDocument, text: string, marginBottom = 0.3) => {
   const content = ensureAscii(text)
   if (!content) return
-  doc.fontSize(10).text(content, {
-    width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+  doc.font(BUNDLED_FONT_PATH)
+    .fillColor(BODY_COLOR)
+    .fontSize(BODY_FONT_SIZE)
+    .text(content, {
+      width: getContentWidth(doc),
     lineGap: 4,
   })
-  doc.moveDown(0.2)
+  addVerticalSpace(doc, marginBottom)
 }
 
-const renderLine = (doc: PDFKit.PDFDocument, text: string, marginBottom = 0.25) => {
+type LineOptions = {
+  marginBottom?: number
+  prefix?: string
+  fontSize?: number
+  color?: string
+}
+
+const renderLine = (doc: PDFKit.PDFDocument, text: string, options: LineOptions = {}) => {
+  const {
+    marginBottom = 0.3,
+    prefix = "",
+    fontSize = BODY_FONT_SIZE,
+    color = BODY_COLOR,
+  } = options
   const content = ensureAscii(text)
   if (!content) return
-  doc.fontSize(10).text(content, {
-    width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
-  })
-  if (marginBottom > 0) doc.moveDown(marginBottom)
+  doc
+    .font(BUNDLED_FONT_PATH)
+    .fillColor(color)
+    .fontSize(fontSize)
+    .text(`${prefix}${content}`, {
+      width: getContentWidth(doc),
+    })
+  addVerticalSpace(doc, marginBottom)
+  doc.fillColor(BODY_COLOR).fontSize(BODY_FONT_SIZE)
 }
 
+type TitledBlockOptions = {
+  title?: string
+  prefix?: string
+  marginBefore?: number
+  marginAfter?: number
+  bullets?: string[]
+  bulletPrefix?: string
+  bulletSpacingAfter?: number
+  titleFontSize?: number
+  titleColor?: string
+}
 
-const renderList = (doc: PDFKit.PDFDocument, items: string[], prefix = "- ") => {
+const renderTitledBlock = (doc: PDFKit.PDFDocument, options: TitledBlockOptions) => {
+  const {
+    title,
+    prefix = "",
+    marginBefore = 0,
+    marginAfter = 0.25,
+    bullets,
+    bulletPrefix = "- ",
+    bulletSpacingAfter,
+    titleFontSize = SUBTITLE_FONT_SIZE,
+    titleColor = BODY_COLOR,
+  } = options
+
+  addVerticalSpace(doc, marginBefore)
+
+  if (title) {
+    renderLine(doc, title, {
+      marginBottom: marginAfter,
+      prefix,
+      fontSize: titleFontSize,
+      color: titleColor,
+    })
+  } else {
+    addVerticalSpace(doc, marginAfter)
+  }
+
+  if (bullets?.length) {
+    const spacingAfter = bulletSpacingAfter ?? 0.2
+    renderList(doc, bullets, bulletPrefix, spacingAfter)
+  }
+}
+
+const renderList = (
+  doc: PDFKit.PDFDocument,
+  items: string[],
+  prefix = "- ",
+  spacingAfter = 0.3
+) => {
   items.forEach((item) => {
     const content = ensureAscii(item)
     if (!content) return
-    doc.fontSize(10).text(`${prefix}${content}`, {
-      width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+    doc
+      .font(BUNDLED_FONT_PATH)
+      .fillColor(BODY_COLOR)
+      .fontSize(BODY_FONT_SIZE)
+      .text(`${prefix}${content}`, {
+        width: getContentWidth(doc),
+      lineGap: 4,
     })
   })
   if (items.length) {
-    doc.moveDown(0.2)
+    addVerticalSpace(doc, spacingAfter)
   }
 }
 
@@ -76,7 +193,7 @@ export const createResumePdf = async (profile: CandidateProfile, optimized: Rewr
     doc.on("error", reject)
   })
 
-  doc.fillColor("#111827")
+  doc.fillColor(BODY_COLOR).font(BUNDLED_FONT_PATH).fontSize(BODY_FONT_SIZE)
 
   const fullName = ensureAscii(optimized.contact.name || profile.contact.name || "Candidate")
   const headline = ensureAscii(optimized.headline)
@@ -94,96 +211,108 @@ export const createResumePdf = async (profile: CandidateProfile, optimized: Rewr
   const contactBottom = ensureAscii(contactMeta.bottom)
 
   doc.fontSize(18).text(fullName.toUpperCase())
-  doc.moveDown(0.2)
-  renderLine(doc, headline)
-  doc.moveDown(0.2)
+  addVerticalSpace(doc, 0.2)
+  if (headline) {
+    renderLine(doc, headline, { marginBottom: 0.2, fontSize: SUBTITLE_FONT_SIZE })
+  }
+  addVerticalSpace(doc, 0.1)
   if (contactTop) {
-    renderLine(doc, contactTop)
+    renderLine(doc, contactTop, { marginBottom: 0.15 })
   }
   if (contactBottom) {
-    renderLine(doc, contactBottom)
+    renderLine(doc, contactBottom, { marginBottom: 0.2 })
   }
 
-  doc.moveDown(0.4)
+  let renderedSections = 0
+  const renderSection = (title: string, renderContent: () => void) => {
+    renderSectionTitle(doc, title, { isFirstSection: renderedSections === 0 })
+    renderedSections += 1
+    renderContent()
+  }
 
   if (optimized.summary) {
-    renderSectionTitle(doc, "Summary")
-    renderParagraph(doc, optimized.summary)
+    renderSection("Summary", () => {
+      renderParagraph(doc, optimized.summary, 0)
+    })
   }
 
   const skillsList = optimized.skills ?? []
   if (skillsList.length) {
-    renderSectionTitle(doc, "Skills")
-    renderLine(doc, skillsList.map(ensureAscii).filter(Boolean).join(" | "))
+    renderSection("Skills", () => {
+      renderLine(doc, skillsList.map(ensureAscii).filter(Boolean).join(" | "), { marginBottom: 0 })
+    })
   }
 
   const experienceEntries = optimized.experience ?? []
   if (experienceEntries.length) {
-    renderSectionTitle(doc, "Experience")
-    experienceEntries.forEach((entry) => {
-      const header = sanitizeExperienceHeader(entry.company, entry.role, entry.dates)
-      if (header) {
-        renderLine(doc, header, 0.3)
-      }
-      if (entry.bullets?.length) {
-        renderList(doc, entry.bullets)
-      }
-      doc.moveDown(0.1)
+    renderSection("Experience", () => {
+      experienceEntries.forEach((entry, index) => {
+        const header = sanitizeExperienceHeader(entry.company, entry.role, entry.dates)
+        renderTitledBlock(doc, {
+          title: header || undefined,
+          marginBefore: 0.4,
+          marginAfter: header ? 0.3 : 0,
+          bullets: entry.bullets,
+          bulletSpacingAfter: 0,
+          titleFontSize: SUBTITLE_FONT_SIZE,
+          titleColor: BODY_COLOR,
+        })
+        if (index < experienceEntries.length - 1) {
+          addVerticalSpace(doc, 0.6)
+        }
+      })
     })
   }
 
   if (optimized.projects && optimized.projects.length) {
-    renderSectionTitle(doc, "Projects")
+    renderSection("Projects", () => {
+      optimized.projects.forEach((project, index) => {
+        const title = sanitizeProjectTitleLine(project.title)
+        renderTitledBlock(doc, {
+          title: title || undefined,
+          prefix: "● ",
+          marginBefore: 0.4,
+          marginAfter: 0.3,
+          bullets: project.bullets,
+          bulletPrefix: "- ",
+          bulletSpacingAfter: 0,
+          titleFontSize: SUBTITLE_FONT_SIZE,
+          titleColor: BODY_COLOR,
+        })
+        if (index < optimized.projects.length - 1) {
+          addVerticalSpace(doc, 0.6)
+        }
+      })
 
-    optimized.projects.forEach((project, index) => {
-      const title = sanitizeProjectTitleLine(project.title)
-      if (title) {
-        renderLine(doc, title, 0.3)
-      }
+      const behanceUrl = optimized.contact.behance || profile.contact.behance
+      if (behanceUrl) {
+        const trimmedBehance = behanceUrl.trim()
+        const slug = ensureAscii(
+          trimmedBehance
+            .replace(/^https?:\/\/(www\.)?behance\.net\/?/i, "")
+            .replace(/^@/, "")
+            .replace(/^\/+/, "")
+        )
+        const sanitizedInput = ensureAscii(trimmedBehance)
+        const portfolioText = slug
+          ? `For portfolio → https://behance.net/${slug}`
+          : `For portfolio → ${sanitizedInput}`
 
-      if (project.bullets?.length) {
-        renderList(doc, project.bullets, "- ")
-      }
-
-      const isLast = index === optimized.projects.length - 1
-      if (!isLast) {
-        doc.moveDown(0.4)
+        addVerticalSpace(doc, 0.8)
+        renderLine(doc, portfolioText, { color: FOOTNOTE_COLOR, marginBottom: 0 })
       }
     })
-
-    const behanceUrl = optimized.contact.behance || profile.contact.behance
-    if (behanceUrl) {
-      const trimmedBehance = behanceUrl.trim()
-      const slug = ensureAscii(
-        trimmedBehance
-          .replace(/^https?:\/\/(www\.)?behance\.net\/?/i, "")
-          .replace(/^@/, "")
-          .replace(/^\/+/, "")
-      )
-      const sanitizedInput = ensureAscii(trimmedBehance)
-      const portfolioText = slug
-        ? `For portfolio → https://behance.net/${slug}`
-        : `For portfolio → ${sanitizedInput}`
-
-      doc.moveDown(0.8)
-      doc
-        .fontSize(10)
-        .fillColor("#4B5563")
-        .text(portfolioText, {
-          width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
-        })
-      doc.fillColor("#111827")
-    }
   }
 
   if (optimized.education && optimized.education.length) {
-    renderSectionTitle(doc, "Education")
-    optimized.education.forEach((entry) => {
-      const parts = [ensureAscii(entry.school), ensureAscii(entry.degree), ensureAscii(entry.dates)]
-        .filter((value) => value && value.length > 0)
-      if (parts.length) {
-        renderLine(doc, parts.join(" - "))
-      }
+    renderSection("Education", () => {
+      optimized.education.forEach((entry, index) => {
+        const parts = [ensureAscii(entry.school), ensureAscii(entry.degree), ensureAscii(entry.dates)]
+          .filter((value) => value && value.length > 0)
+        if (parts.length) {
+          renderLine(doc, parts.join(" - "), { marginBottom: index < optimized.education.length - 1 ? 0.3 : 0 })
+        }
+      })
     })
   }
 
