@@ -33,13 +33,15 @@ const renderParagraph = (doc: PDFKit.PDFDocument, text: string) => {
   doc.moveDown(0.2)
 }
 
-const renderLine = (doc: PDFKit.PDFDocument, text: string) => {
+const renderLine = (doc: PDFKit.PDFDocument, text: string, marginBottom = 0.25) => {
   const content = ensureAscii(text)
   if (!content) return
   doc.fontSize(10).text(content, {
     width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
   })
+  if (marginBottom > 0) doc.moveDown(marginBottom)
 }
+
 
 const renderList = (doc: PDFKit.PDFDocument, items: string[], prefix = "- ") => {
   items.forEach((item) => {
@@ -121,7 +123,7 @@ export const createResumePdf = async (profile: CandidateProfile, optimized: Rewr
     experienceEntries.forEach((entry) => {
       const header = sanitizeExperienceHeader(entry.company, entry.role, entry.dates)
       if (header) {
-        renderLine(doc, header)
+        renderLine(doc, header, 0.3)
       }
       if (entry.bullets?.length) {
         renderList(doc, entry.bullets)
@@ -135,7 +137,7 @@ export const createResumePdf = async (profile: CandidateProfile, optimized: Rewr
     optimized.projects.forEach((project) => {
       const title = sanitizeProjectTitleLine(project.title)
       if (title) {
-        renderLine(doc, title)
+        renderLine(doc, title, 0.3)
       }
       if (project.bullets?.length) {
         renderList(doc, project.bullets, "- ")
