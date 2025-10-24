@@ -32,6 +32,7 @@ src/
 │  ├─ normalizers.ts            # Sanitizers for profiles and job specs
 │  ├─ pdf.ts                    # pdfkit resume layout helper
 │  └─ truth-guard.ts            # Prompt contract for OpenAI matching
+└─ public/fonts/                # Bundled PDFKit-safe fonts (e.g., Roboto-Regular.ttf)
 └─ types/index.ts               # Zod schemas + shared TypeScript types
 ```
 
@@ -73,5 +74,6 @@ src/
 - Lint: `pnpm lint`
 - The UI and APIs work without an OpenAI key using mocked responses, so you can iterate on styling and PDF rendering offline.
 - Jest & Testing Library are installed and ready for future truth-guard rule tests (configure `jest.config.ts` when needed).
+- PDF export registers the bundled font at `public/fonts/Roboto-Regular.ttf`; keep the file in repo (replace with another TTF if you prefer a different typeface).
 
 Happy matching!

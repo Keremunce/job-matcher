@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { ExportPdfSchema } from "@/types"
+import { ExportPdfSchema } from "@/types/schemas/pdf"
 import { normalizeCandidateProfile } from "@/lib/normalizers"
 import { createResumePdf } from "@/lib/pdf"
 
@@ -18,9 +18,7 @@ export async function POST(req: NextRequest) {
     }
 
     const normalizedProfile = normalizeCandidateProfile(parsed.data.candidateProfile)
-    const pdfBuffer = await createResumePdf(normalizedProfile, parsed.data.matchOutput, {
-      includeCoverLetter: true,
-    })
+    const pdfBuffer = await createResumePdf(normalizedProfile, parsed.data.optimizedResume)
 
     const responseHeaders = new Headers({
       "Content-Type": "application/pdf",

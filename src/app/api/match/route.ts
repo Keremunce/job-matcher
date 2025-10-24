@@ -1,14 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
-import {
-  CandidateProfile,
-  CandidateProfileSchema,
-  JobSpec,
-  JobSpecSchema,
-  MatchOutput,
-  MatchOutputSchema,
-  MatchPayloadSchema,
-} from "@/types"
+import type { CandidateProfile, JobSpec, MatchOutput } from "@/types"
+import { CandidateProfileSchema, JobSpecSchema, MatchPayloadSchema } from "@/types/schemas/core"
+import { MatchOutputSchema } from "@/types/schemas/match"
 import {
   cleanJobDescription,
   cleanResumeText,

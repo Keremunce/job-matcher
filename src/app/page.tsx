@@ -23,8 +23,9 @@ import {
   Textarea,
   ThemeToggle,
 } from "@/components/ui"
-import type { CandidateProfile, JobSpec, MatchOutput } from "@/types"
+import type { CandidateProfile, JobSpec, MatchOutput, RewriteResume } from "@/types"
 import { extractPdfText } from "@/lib/client/pdfExtractor"
+import { composeContact } from "@/lib/normalizers"
 import { cn } from "@/lib/utils"
 
 const optionalEmail = z.string().email("Enter a valid email.").or(z.literal("")).optional()
@@ -44,7 +45,8 @@ const manualProfileSchema = z.object({
   email: optionalEmail,
   phone: z.string().optional(),
   linkedin: optionalUrl,
-  portfolio: optionalUrl,
+  website: optionalUrl,
+  behance: optionalUrl,
   title: z.string().optional(),
   location: z.string().optional(),
   skills: z.string().optional(),
@@ -85,7 +87,9 @@ const toCandidateProfile = (values: ManualProfileFormValues): CandidateProfile =
       email: values.email?.trim() || undefined,
       phone: values.phone?.trim() || undefined,
       linkedin: values.linkedin?.trim() || undefined,
-      portfolio: values.portfolio?.trim() || undefined,
+      portfolio: values.website?.trim() || undefined,
+      website: values.website?.trim() || undefined,
+      behance: values.behance?.trim() || undefined,
     },
     title: values.title?.trim() || undefined,
     location: values.location?.trim() || undefined,
@@ -107,7 +111,8 @@ const toFormValues = (
   email: profile.contact.email ?? "",
   phone: profile.contact.phone ?? "",
   linkedin: profile.contact.linkedin ?? "",
-  portfolio: profile.contact.portfolio ?? "",
+  website: profile.contact.website ?? profile.contact.portfolio ?? "",
+  behance: profile.contact.behance ?? "",
   title: profile.title ?? "",
   location: profile.location ?? "",
   skills: profile.skills.join(", "),
@@ -160,7 +165,7 @@ export default function Home() {
   const [pdfTextSource, setPdfTextSource] = useState<"client" | "ocr" | null>(null)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [rewriteLoading, setRewriteLoading] = useState(false)
-  const [improvedResume, setImprovedResume] = useState<string | null>(null)
+  const [optimizedResume, setOptimizedResume] = useState<RewriteResume | null>(null)
   const [resumeReady, setResumeReady] = useState(false)
   const [lastSubmittedSignature, setLastSubmittedSignature] = useState<string | null>(null)
   const [rewriteError, setRewriteError] = useState<string | null>(null)
@@ -174,7 +179,8 @@ export default function Home() {
       email: "",
       phone: "",
       linkedin: "",
-      portfolio: "",
+      website: "",
+      behance: "",
       title: "",
       location: "",
       skills: "",
@@ -227,6 +233,19 @@ export default function Home() {
     return lines.filter(Boolean).join("\n")
   }, [pdfText, candidateProfile, previewProfile])
 
+  const optimizedContactMeta = useMemo(() => {
+    if (!optimizedResume) return null
+
+    return composeContact({
+      email: optimizedResume.contact.email,
+      phone: optimizedResume.contact.phone,
+      linkedin: optimizedResume.contact.linkedin,
+      website: optimizedResume.contact.website,
+      behance: optimizedResume.contact.behance,
+      location: optimizedResume.contact.location,
+    })
+  }, [optimizedResume])
+
   useEffect(() => {
     if (!resumeReady || !lastSubmittedSignature) {
       return
@@ -236,7 +255,7 @@ export default function Home() {
     if (currentSignature !== lastSubmittedSignature) {
       setResumeReady(false)
       setMatchResult(null)
-      setImprovedResume(null)
+      setOptimizedResume(null)
       setRewriteError(null)
     }
   }, [resumeReady, lastSubmittedSignature, watchedValues])
@@ -252,7 +271,7 @@ export default function Home() {
       setResumeReady(false)
       setMatchResult(null)
       setLastSubmittedSignature(null)
-      setImprovedResume(null)
+      setOptimizedResume(null)
       setRewriteError(null)
       setRewriteLoading(false)
 
@@ -343,7 +362,7 @@ export default function Home() {
         throw new Error("OCR response did not include text.")
       }
 
-      setImprovedResume(null)
+      setOptimizedResume(null)
       setRewriteError(null)
       setResumeReady(false)
       setMatchResult(null)
@@ -362,7 +381,7 @@ export default function Home() {
     setMatchLoading(true)
     setMatchError(null)
     setMatchResult(null)
-    setImprovedResume(null)
+    setOptimizedResume(null)
     setRewriteError(null)
 
     try {
@@ -401,7 +420,7 @@ export default function Home() {
   })
 
   const handleExportPdf = async () => {
-    if (!candidateProfile || !matchResult) {
+    if (!candidateProfile || !matchResult || !optimizedResume) {
       setMatchError("Generate a match before exporting the resume.")
       return
     }
@@ -416,6 +435,7 @@ export default function Home() {
         body: JSON.stringify({
           candidateProfile,
           matchOutput: matchResult,
+          optimizedResume,
         }),
       })
 
@@ -483,7 +503,7 @@ export default function Home() {
   const runRewrite = async (profile: CandidateProfile, jobSpec: JobSpec, result: MatchOutput) => {
     setRewriteLoading(true)
     setRewriteError(null)
-    setImprovedResume(null)
+    setOptimizedResume(null)
 
     try {
       const res = await fetch("/api/rewrite-resume", {
@@ -501,13 +521,12 @@ export default function Home() {
         throw new Error(details.error ?? "Failed to generate optimized resume.")
       }
 
-      const payload = (await res.json()) as { rewrite?: string }
-      const text = payload.rewrite?.trim()
-      if (!text) {
+      const payload = (await res.json()) as { rewrite?: RewriteResume }
+      if (!payload.rewrite) {
         throw new Error("Rewrite response was empty.")
       }
 
-      setImprovedResume(text)
+      setOptimizedResume(payload.rewrite)
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unexpected error while optimizing resume."
@@ -703,12 +722,25 @@ export default function Home() {
                 />
                 <FormField
                   control={control}
-                  name="portfolio"
+                  name="website"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Portfolio / Website</FormLabel>
                       <FormControl>
                         <Input placeholder="https://portfolio.dev" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={control}
+                  name="behance"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Behance</FormLabel>
+                      <FormControl>
+                        <Input placeholder="https://behance.net/username" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -923,10 +955,79 @@ export default function Home() {
                   </div>
                 ) : rewriteError ? (
                   <p className="text-sm text-red-500 dark:text-red-400">{rewriteError}</p>
-                ) : improvedResume ? (
-                  <pre className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap rounded-md bg-neutral-100 p-4 text-sm leading-relaxed text-neutral-800 dark:bg-neutral-950 dark:text-neutral-100">
-                    {improvedResume}
-                  </pre>
+                ) : optimizedResume ? (
+                  <div className="max-h-[28rem] overflow-y-auto space-y-5 rounded-md bg-neutral-100 p-4 text-sm leading-relaxed text-neutral-800 dark:bg-neutral-950 dark:text-neutral-100">
+                    <div className="space-y-1">
+                      <p className="text-lg font-semibold uppercase tracking-wide">{optimizedResume.contact.name}</p>
+                      <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{optimizedResume.headline}</p>
+                      {optimizedContactMeta?.top && (
+                        <p className="text-xs text-neutral-600 dark:text-neutral-400">{optimizedContactMeta.top}</p>
+                      )}
+                      {optimizedContactMeta?.bottom && optimizedContactMeta.bottom.trim().length > 0 && (
+                        <p className="text-xs text-neutral-600 dark:text-neutral-400">{optimizedContactMeta.bottom}</p>
+                      )}
+                    </div>
+
+                    <section className="space-y-2">
+                      <h4 className="text-xs font-semibold tracking-[0.2em] text-neutral-500">SUMMARY</h4>
+                      <p>{optimizedResume.summary}</p>
+                    </section>
+
+                    {optimizedResume.skills && optimizedResume.skills.length > 0 && (
+                      <section className="space-y-2">
+                        <h4 className="text-xs font-semibold tracking-[0.2em] text-neutral-500">SKILLS</h4>
+                        <p>{optimizedResume.skills.join(" | ")}</p>
+                      </section>
+                    )}
+
+                    {optimizedResume.experience && optimizedResume.experience.length > 0 && (
+                      <section className="space-y-3">
+                        <h4 className="text-xs font-semibold tracking-[0.2em] text-neutral-500">EXPERIENCE</h4>
+                        {optimizedResume.experience.map((item, index) => (
+                          <div key={`${item.company}-${index}`} className="space-y-1">
+                            <p className="font-semibold">
+                              {item.company} — {item.role}
+                              {item.dates ? ` — ${item.dates}` : ""}
+                            </p>
+                            {(item.bullets ?? []).map((bullet, bulletIndex) => (
+                              <p key={`${item.company}-${bulletIndex}`} className="text-sm text-neutral-700 dark:text-neutral-300">
+                                - {bullet}
+                              </p>
+                            ))}
+                          </div>
+                        ))}
+                      </section>
+                    )}
+
+                    {optimizedResume.projects && optimizedResume.projects.length > 0 && (
+                      <section className="space-y-3">
+                        <h4 className="text-xs font-semibold tracking-[0.2em] text-neutral-500">PROJECTS</h4>
+                        {optimizedResume.projects.map((project, index) => (
+                          <div key={`${project.title}-${index}`} className="space-y-1">
+                            <p className="font-semibold">{project.title}</p>
+                            {(project.bullets ?? []).map((bullet, bulletIndex) => (
+                              <p key={`${project.title}-${bulletIndex}`} className="text-sm text-neutral-700 dark:text-neutral-300">
+                                - {bullet}
+                              </p>
+                            ))}
+                          </div>
+                        ))}
+                      </section>
+                    )}
+
+                    {optimizedResume.education && optimizedResume.education.length > 0 && (
+                      <section className="space-y-2">
+                        <h4 className="text-xs font-semibold tracking-[0.2em] text-neutral-500">EDUCATION</h4>
+                        {optimizedResume.education.map((edu, index) => (
+                          <p key={`${edu.school}-${index}`} className="text-sm text-neutral-700 dark:text-neutral-300">
+                            {edu.school}
+                            {edu.degree ? ` — ${edu.degree}` : ""}
+                            {edu.dates ? ` — ${edu.dates}` : ""}
+                          </p>
+                        ))}
+                      </section>
+                    )}
+                  </div>
                 ) : (
                   <p className="text-sm text-neutral-500 dark:text-neutral-400">
                     Optimized resume will appear here once generated.

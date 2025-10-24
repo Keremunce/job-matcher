@@ -2,15 +2,74 @@ import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 import { z } from "zod"
 
-import { CandidateProfile, CandidateProfileSchema, JobSpecSchema, MatchOutputSchema } from "@/types"
+import type { CandidateProfile, RewriteResume } from "@/types"
+import { CandidateProfileSchema, JobSpecSchema } from "@/types/schemas/core"
+import { MatchOutputSchema } from "@/types/schemas/match"
+import { RewriteResumeSchema } from "@/types/schemas/rewrite"
 import {
   cleanJobDescription,
   cleanResumeText,
   collectEvidenceStrings,
+  asciiSafe,
+  dedupeLines,
   normalizeCandidateProfile,
   normalizeJobSpec,
+  sanitizeProjectTitle,
+  stripNameFromSummary,
 } from "@/lib/normalizers"
 import { buildRewriteSystemPrompt, buildRewriteUserContent } from "@/lib/truth-guard"
+
+const sanitizeBulletArray = (items: string[], limit = 3): string[] => {
+  const deduped = dedupeLines(items.join("\n"))
+    .split("\n")
+    .map((line) => asciiSafe(line))
+    .filter(Boolean)
+  return deduped.slice(0, limit)
+}
+
+const sanitizeRewritePayload = (payload: RewriteResume, targetRole: string, candidateName: string): RewriteResume => {
+  const location = payload.contact.location ? asciiSafe(payload.contact.location) : undefined
+  const safeContact = {
+    name: asciiSafe(payload.contact.name || candidateName || "Candidate"),
+    email: payload.contact.email?.trim() ?? undefined,
+    phone: payload.contact.phone?.trim() ?? undefined,
+    linkedin: payload.contact.linkedin?.trim() ?? undefined,
+    website: payload.contact.website?.trim() ?? undefined,
+    behance: payload.contact.behance?.trim() ?? undefined,
+    location,
+  }
+
+  const rawSkills = payload.skills ?? []
+  const skills = Array.from(new Set(rawSkills.map((skill) => asciiSafe(skill)).filter(Boolean)))
+
+  const experience = (payload.experience ?? []).map((entry) => ({
+    company: asciiSafe(sanitizeProjectTitle(entry.company || "")),
+    role: asciiSafe(entry.role || targetRole),
+    dates: entry.dates ? asciiSafe(entry.dates) : undefined,
+    bullets: sanitizeBulletArray(entry.bullets ?? [], 3),
+  }))
+
+  const projects = payload.projects?.map((project) => ({
+    title: asciiSafe(sanitizeProjectTitle(project.title || "")),
+    bullets: sanitizeBulletArray(project.bullets ?? [], 2),
+  }))
+
+  const education = payload.education?.map((item) => ({
+    school: asciiSafe(item.school || ""),
+    degree: item.degree ? asciiSafe(item.degree) : undefined,
+    dates: item.dates ? asciiSafe(item.dates) : undefined,
+  }))
+
+  return {
+    contact: safeContact,
+    headline: asciiSafe(targetRole),
+    summary: asciiSafe(stripNameFromSummary(payload.summary || "", candidateName)),
+    skills,
+    experience,
+    projects,
+    education,
+  }
+}
 
 const RewritePayloadSchema = z.object({
   candidateProfile: CandidateProfileSchema,
@@ -18,52 +77,67 @@ const RewritePayloadSchema = z.object({
   matchOutput: MatchOutputSchema,
 })
 
-const buildFallbackResume = (profile: CandidateProfile, targetRole: string, highlights: string[], gaps: string[]) => {
-  const lines: string[] = []
-  lines.push(profile.contact.name || "Candidate")
-  lines.push(targetRole ? `Target Role: ${targetRole}` : "")
-  if (profile.title) {
-    lines.push(`Current Title: ${profile.title}`)
-  }
-  if (profile.location) {
-    lines.push(`Location: ${profile.location}`)
-  }
-  lines.push("")
-
-  const summaryPieces = [
-    profile.additionalContext,
-    highlights.length ? `Strengths: ${highlights.join("; ")}` : null,
-    gaps.length ? `Focus Areas: ${gaps.join("; ")}` : null,
+const buildFallbackResume = (profile: CandidateProfile, targetRole: string, highlights: string[], gaps: string[]): RewriteResume => {
+  const summaryParts = [
+    profile.additionalContext?.trim(),
+    highlights.length ? `Strengths: ${highlights.join(", ")}` : null,
+    gaps.length ? `Focus Areas: ${gaps.join(", ")}` : null,
   ].filter(Boolean)
 
-  if (summaryPieces.length) {
-    lines.push("Summary")
-    lines.push(summaryPieces.join(" "))
-    lines.push("")
+  const combinedSkills = Array.from(new Set([...profile.skills, ...profile.tools].map((skill) => asciiSafe(skill))))
+
+  const experienceEntries = profile.projects.slice(0, 2).map((project) => ({
+    company: asciiSafe(sanitizeProjectTitle(project.name ?? "Project")),
+    role: targetRole,
+    bullets: dedupeLines([
+      project.summary,
+      ...project.outcomes,
+      profile.additionalContext ?? "",
+    ].filter(Boolean).join("\n"))
+      .split("\n")
+      .map((line) => asciiSafe(line))
+      .filter(Boolean)
+      .slice(0, 3),
+  }))
+
+  const projectEntries = profile.projects.map((project) => ({
+    title: asciiSafe(sanitizeProjectTitle(project.name ?? "Project")),
+    bullets: dedupeLines([project.summary, ...project.outcomes].filter(Boolean).join("\n"))
+      .split("\n")
+      .map((line) => asciiSafe(line))
+      .filter(Boolean)
+      .slice(0, 2),
+  }))
+
+  const summary = summaryParts.length
+    ? asciiSafe(stripNameFromSummary(summaryParts.join(". "), profile.contact.name || ""))
+    : asciiSafe(targetRole)
+
+  const fallback: RewriteResume = {
+    contact: {
+      name: profile.contact.name,
+      email: profile.contact.email ?? undefined,
+      phone: profile.contact.phone ?? undefined,
+      linkedin: profile.contact.linkedin ?? undefined,
+      website: profile.contact.website ?? profile.contact.portfolio ?? undefined,
+      behance: profile.contact.behance ?? undefined,
+      location: profile.location ? asciiSafe(profile.location) : undefined,
+    },
+    headline: targetRole,
+    summary,
+    skills: combinedSkills.filter(Boolean),
+    experience: experienceEntries.map((entry) => ({
+      company: entry.company,
+      role: entry.role,
+      bullets: entry.bullets,
+    })),
   }
 
-  if (profile.skills.length || profile.tools.length) {
-    lines.push("Skills")
-    const combined = Array.from(new Set([...profile.skills, ...profile.tools]))
-    lines.push(combined.join(", "))
-    lines.push("")
+  if (projectEntries.length) {
+    fallback.projects = projectEntries
   }
 
-  if (profile.projects.length) {
-    lines.push("Experience")
-    profile.projects.forEach((project) => {
-      lines.push(`${project.name} — ${project.summary}`)
-      if (project.skills.length) {
-        lines.push(`Stack: ${project.skills.join(", ")}`)
-      }
-      if (project.outcomes.length) {
-        lines.push(`Outcomes: ${project.outcomes.join("; ")}`)
-      }
-      lines.push("")
-    })
-  }
-
-  return lines.join("\n").trim()
+  return fallback
 }
 
 export async function POST(req: NextRequest) {
@@ -138,6 +212,7 @@ export async function POST(req: NextRequest) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
       ],
+      response_format: { type: "json_object" },
     })
 
     const rewrite = completion.choices[0]?.message?.content?.trim()
@@ -145,7 +220,17 @@ export async function POST(req: NextRequest) {
       throw new Error("No rewrite suggestions returned from OpenAI.")
     }
 
-    return NextResponse.json({ rewrite })
+    let parsed: RewriteResume
+    try {
+      const jsonPayload = JSON.parse(rewrite)
+      parsed = RewriteResumeSchema.parse(jsonPayload)
+    } catch (error) {
+      throw new Error(`Unable to parse rewrite response: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    const sanitized = sanitizeRewritePayload(parsed, targetRole, normalizedProfile.contact.name)
+
+    return NextResponse.json({ rewrite: sanitized })
   } catch (error) {
     console.error("[api/rewrite-resume] error", error)
     return NextResponse.json(
