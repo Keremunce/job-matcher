@@ -134,16 +134,46 @@ export const createResumePdf = async (profile: CandidateProfile, optimized: Rewr
 
   if (optimized.projects && optimized.projects.length) {
     renderSectionTitle(doc, "Projects")
-    optimized.projects.forEach((project) => {
+
+    optimized.projects.forEach((project, index) => {
       const title = sanitizeProjectTitleLine(project.title)
       if (title) {
         renderLine(doc, title, 0.3)
       }
+
       if (project.bullets?.length) {
         renderList(doc, project.bullets, "- ")
       }
-      doc.moveDown(0.1)
+
+      const isLast = index === optimized.projects.length - 1
+      if (!isLast) {
+        doc.moveDown(0.4)
+      }
     })
+
+    const behanceUrl = optimized.contact.behance || profile.contact.behance
+    if (behanceUrl) {
+      const trimmedBehance = behanceUrl.trim()
+      const slug = ensureAscii(
+        trimmedBehance
+          .replace(/^https?:\/\/(www\.)?behance\.net\/?/i, "")
+          .replace(/^@/, "")
+          .replace(/^\/+/, "")
+      )
+      const sanitizedInput = ensureAscii(trimmedBehance)
+      const portfolioText = slug
+        ? `For portfolio → https://behance.net/${slug}`
+        : `For portfolio → ${sanitizedInput}`
+
+      doc.moveDown(0.8)
+      doc
+        .fontSize(10)
+        .fillColor("#4B5563")
+        .text(portfolioText, {
+          width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+        })
+      doc.fillColor("#111827")
+    }
   }
 
   if (optimized.education && optimized.education.length) {
